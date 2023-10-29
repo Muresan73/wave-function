@@ -19,15 +19,11 @@ pub fn render<B: Backend>(app: &mut App, frame: &mut Frame<'_, B>) {
 
   let layout = Layout::default()
     .direction(Direction::Vertical)
-    .constraints(vec![Percentage(50), Length(15),Min(0)])
+    .constraints(vec![Percentage(50), Length(15), Min(0)])
     .split(frame.size());
   let work_area = Layout::default()
     .direction(Direction::Horizontal)
-    .constraints([
-      Length(25 ),
-      Length(9),
-      Min(0),
-    ])
+    .constraints([Length(25), Length(25), Min(0)])
     .split(layout[1]);
 
   frame.render_widget(
@@ -57,12 +53,22 @@ pub fn render<B: Backend>(app: &mut App, frame: &mut Frame<'_, B>) {
     Paragraph::new("Hmmm....")
       .style(Style::default().bg(Color::Blue).fg(Color::Yellow))
       .block(Block::default().title("Work area").borders(Borders::ALL)),
-      work_area[0],
+    work_area[0],
   );
   frame.render_widget(
-    Paragraph::new("Hello Ratatui! (press 'q' to quit)")
-      .style(Style::default().bg(Color::Blue).fg(Color::Yellow))
-      .block(Block::default().title("B2").borders(Borders::ALL)),
-      work_area[1],
+    Canvas::default()
+      .block(Block::default().title("Canvas").borders(Borders::ALL))
+      .x_bounds([0.0, 10.0])
+      .y_bounds([0.0, 10.0])
+      .paint(|ctx| {
+        ctx.draw(&Line {
+          x1: 0.0,
+          y1: 10.0,
+          x2: 10.0,
+          y2: 10.0 + app.counter as f64,
+          color: Color::White,
+        })
+      }),
+    work_area[1],
   );
 }

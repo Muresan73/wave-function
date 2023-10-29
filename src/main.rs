@@ -6,6 +6,8 @@ use std::io;
 use tui::backend::CrosstermBackend;
 use tui::Terminal;
 
+mod node;
+
 fn main() -> AppResult<()> {
     // Create an application.
     let mut app = App::new();
