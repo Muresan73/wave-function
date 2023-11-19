@@ -201,24 +201,13 @@ pub fn main() {
   game.run(Grass.into(), 0, 0);
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
+pub fn bench() {
+  use Direction::*;
+  use Tile::*;
 
-  // #[test]
-  // fn same_game() {
-  //   use Direction::*;
-
-  //   let mut system = System::default();
-  //   let trigger = [1, 0, 0];
-  //   system.propagate(&trigger, Direct, 1, 1);
-  //   let trigger = [0, 1, 0];
-  //   system.propagate(&trigger, Direct, 1, 1);
-
-  //   let mut game = Game::default();
-  //   game.run(&[1, 0, 0], 1, 1);
-  //   game.run(&[0, 1, 0], 1, 1);
-
-  //   assert_eq!(system.grid, game.system.grid);
-  // }
+  let mut system = System::default();
+  System::propagate(&mut system.grid, Water.into(), Direct, 1, 1);
+  System::propagate(&mut system.grid, Sand.into(), Direct, 1, 2);
+  System::propagate(&mut system.grid, Sand.into(), Direct, 2, 1);
+  System::propagate(&mut system.grid, Grass.into(), Direct, 0, 0);
 }
