@@ -3,6 +3,7 @@ use ndarray::prelude::*;
 use rayon::prelude::*;
 use std::{fmt::Display, usize};
 
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Direction {
   Left,
   Right,
@@ -78,15 +79,61 @@ trait Wave<const N: usize> {
   fn show(&self) -> String;
 }
 
-const FEATURE_SIZE: usize = 3;
+const FEATURE_SIZE: usize = 5;
+
+enum Tile {
+  Tree,
+  Water,
+  Sand,
+  Rock,
+  Grass,
+  Invalid,
+  SP,
+}
+
+impl From<&Features<FEATURE_SIZE>> for Tile {
+  fn from(value: &Features<FEATURE_SIZE>) -> Self {
+    match value {
+      [1, 0, 0, 0, 0] => Tile::Water,
+      [0, 1, 0, 0, 0] => Tile::Sand,
+      [0, 0, 1, 0, 0] => Tile::Grass,
+      [0, 0, 0, 1, 0] => Tile::Tree,
+      [0, 0, 0, 0, 1] => Tile::Rock,
+      [0, 0, 0, 0, 0] => Tile::Invalid,
+      _ => Tile::SP,
+    }
+  }
+}
+
+impl From<Tile> for &Features<FEATURE_SIZE> {
+  fn from(value: Tile) -> Self {
+    match value {
+      Tile::Water => &[1, 0, 0, 0, 0],
+      Tile::Sand => &[0, 1, 0, 0, 0],
+      Tile::Grass => &[0, 0, 1, 0, 0],
+      Tile::Tree => &[0, 0, 0, 1, 0],
+      Tile::Rock => &[0, 0, 0, 0, 1],
+      Tile::Invalid => &[0, 0, 0, 0, 0],
+      Tile::SP => panic!("Superposition has no one to one mapping to tile."),
+    }
+  }
+}
 
 impl Wave<FEATURE_SIZE> for System<FEATURE_SIZE> {
   fn rule(direction: &Direction, trigger: &Features<FEATURE_SIZE>) -> Features<FEATURE_SIZE> {
-    match trigger {
-      [1, 0, 0] => [0, 1, 1],
-      [0, 1, 0] => [1, 0, 1],
-      [0, 0, 1] => [1, 1, 0],
-      [_, _, _] => [1, 1, 1],
+    use Tile::*;
+
+    if direction == &Direction::Direct {
+      return *trigger;
+    }
+
+    match trigger.into() {
+      Water => [1, 1, 0, 0, 0],
+      Sand => [1, 1, 1, 0, 0],
+      Grass => [0, 1, 1, 1, 1],
+      Tree => [0, 0, 1, 1, 0],
+      Rock => [0, 1, 1, 0, 0],
+      _ => [1, 1, 1, 1, 1],
     }
   }
 
@@ -97,16 +144,18 @@ impl Wave<FEATURE_SIZE> for System<FEATURE_SIZE> {
 
 impl Display for Node<FEATURE_SIZE> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    use Tile::*;
     write!(
       f,
       "{}",
-      match self.data {
-        [1, 0, 0] => "\x1b[30;41mT1\x1b[0m".to_string(),
-        [0, 1, 0] => "🌊".to_string(),
-        [0, 0, 1] => "\x1b[30;43mT3\x1b[0m".to_string(),
-        // [0, 0, 1] => "🌳".to_string(),
-        [0, 0, 0] => "\x1b[0;31mXX\x1b[0m".to_string(),
-        [_, _, _] => match self.get_entropy() {
+      match (&self.data).into() {
+        Water => "\x1b[00;44mT1\x1b[0m".to_string(),
+        Sand => "\x1b[30;43mT2\x1b[0m".to_string(),
+        Grass => "\x1b[30;42mT3\x1b[0m".to_string(),
+        Tree => "🌳".to_string(),
+        Rock => "🪨".to_string(),
+        Invalid => "\x1b[0;31mXX\x1b[0m".to_string(),
+        _ => match self.get_entropy() {
           2 => "\x1b[0;34mS2\x1b[0m".to_string(),
           3 => "\x1b[0;36mS3\x1b[0m".to_string(),
           _ => format!("S{}", self.get_entropy()),
@@ -136,23 +185,20 @@ impl<const N: usize> Default for System<N> {
   fn default() -> Self {
     Self {
       weights: [0.25; N],
-      grid: array![
-        [Node::default(), Node::default(), Node::default()],
-        [Node::default(), Node::default(), Node::default()],
-        [Node::default(), Node::default(), Node::default()],
-      ],
+      grid: Array2::default((10, 10)),
     }
   }
 }
 
 pub fn main() {
+  use Tile::*;
+
   env_logger::init();
   let mut game = Game::default();
-
-  game.run(&[1, 0, 0], 1, 1);
-  game.run(&[0, 1, 0], 1, 1);
-  game.run(&[1, 0, 0], 1, 2);
-  game.run(&[0, 1, 0], 2, 1);
+  game.run(Water.into(), 1, 1);
+  game.run(Sand.into(), 1, 2);
+  game.run(Sand.into(), 2, 1);
+  game.run(Grass.into(), 0, 0);
 }
 
 #[cfg(test)]
