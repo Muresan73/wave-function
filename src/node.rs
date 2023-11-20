@@ -1,6 +1,6 @@
 use ndarray::prelude::*;
 use rayon::prelude::*;
-use std::{fmt::Display, usize};
+use std::{fmt::Display, thread::sleep, usize};
 
 trait Wave<const N: usize> {
   fn propagate(
@@ -70,13 +70,17 @@ pub fn main() {
   game.run(Tree.into(), 5, 5);
   game.run(Sand.into(), 6, 5);
   game.run(Rock.into(), 7, 4);
+  while game.next_round().is_some() {
+    sleep(std::time::Duration::from_secs(1));
+    game.next_round();
+  }
 }
 
 // ==============
 // Enums
 // ==============
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(PartialEq)]
 enum Direction {
   Left,
   Right,
@@ -146,7 +150,7 @@ impl<const N: usize> Default for System<N> {
   }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Eq, PartialOrd, Ord)]
 struct Node<const N: usize> {
   data: Features<N>,
 }
@@ -198,6 +202,19 @@ impl Game {
     println!("RND {}", self.round);
     println!("{}", self.system.show());
   }
+  fn next_round(&mut self) -> Option<()> {
+    let ((x, y), low_entropy_node) = self
+      .system
+      .grid
+      .indexed_iter()
+      .filter(|((_, _), node)| node.get_entropy() > 1)
+      .min()?;
+
+    let mut rnd = rand::rngs::ThreadRng::default();
+    let trigger = get_rnd_tile(&low_entropy_node.data, &mut rnd);
+    self.run(&trigger, x, y);
+    Some(())
+  }
 }
 
 // ================
@@ -208,6 +225,22 @@ fn zip_mut<const N: usize>(origin: &mut Node<N>, trigger: &Features<N>) {
   origin.data.iter_mut().zip(trigger.iter()).for_each(|(o, t)| {
     *o *= *t;
   });
+}
+
+fn get_rnd_tile<const N: usize>(superposition: &Features<N>, rnd: &mut impl rand::RngCore) -> Features<N> {
+  use rand::seq::SliceRandom;
+
+  let index_list: Vec<_> = superposition
+    .iter()
+    .enumerate()
+    .filter(|(_, &value)| value != 0)
+    .map(|(index, _)| index)
+    .collect();
+
+  let index = index_list.choose(rnd).expect("Node is not in superposition.");
+  let mut result = [0; N];
+  result[*index] = 1;
+  result
 }
 
 // ================
@@ -223,4 +256,21 @@ pub fn bench() {
   System::propagate(&mut system.grid, Sand.into(), Direct, 1, 2);
   System::propagate(&mut system.grid, Sand.into(), Direct, 2, 1);
   System::propagate(&mut system.grid, Grass.into(), Direct, 0, 0);
+}
+
+//test get_rnd_tile
+mod tests {
+  use super::*;
+  #[test]
+  fn test_get_rnd_tile() {
+    use rand::prelude::*;
+    let superposition = [0, 1, 0, 1, 0];
+    let mut rnd = rand::rngs::StdRng::seed_from_u64(1);
+    let result = get_rnd_tile(&superposition, &mut rnd);
+    assert_eq!(result, [0, 0, 0, 1, 0]);
+
+    let superposition = [0, 1, 0, 1, 0, 0, 1, 1, 1];
+    let result = get_rnd_tile(&superposition, &mut rnd);
+    assert_eq!(result, [0, 0, 0, 0, 0, 0, 1, 0, 0]);
+  }
 }
