@@ -2,6 +2,36 @@ use ndarray::prelude::*;
 use rayon::prelude::*;
 use std::{fmt::Display, thread::sleep, usize};
 
+pub fn main() {
+  env_logger::init();
+  let system = System {
+    weights: [0.25; FEATURE_SIZE],
+    grid: Array2::default((50, 70)),
+  };
+  let mut game = Game::new(system);
+
+  use crossterm::cursor::*;
+  use crossterm::{execute, ExecutableCommand};
+  sleep(std::time::Duration::from_millis(600));
+  println!("Strtaing simulation");
+
+  std::io::stdout().execute(SavePosition);
+  std::io::stdout().execute(RestorePosition);
+
+  while game.next_round().is_some() {
+    // sleep(std::time::Duration::from_secs(1));
+    game.next_round();
+    if game.round % 100 == 0 {
+      println!("RND {},{:?}", game.round, crossterm::cursor::position());
+
+      println!("{}", game.system.show());
+      std::io::stdout().execute(RestorePosition);
+      std::io::stdout().execute(MoveTo(0, 0));
+    }
+  }
+  println!("{}", game.system.show());
+}
+
 trait Wave<const N: usize> {
   fn propagate(
     grid: &mut Array2<Node<N>>,
@@ -54,25 +84,6 @@ impl Wave<FEATURE_SIZE> for System<FEATURE_SIZE> {
       .map(|x| x.iter().map(|x| x.to_string()).collect::<String>())
       .collect::<Vec<String>>()
       .join("\n")
-  }
-}
-
-pub fn main() {
-  use Tile::*;
-
-  env_logger::init();
-  let mut game = Game::default();
-  game.run(Water.into(), 1, 1);
-  game.run(Sand.into(), 1, 2);
-  game.run(Sand.into(), 2, 1);
-  game.run(Grass.into(), 0, 0);
-  game.run(Grass.into(), 0, 0);
-  game.run(Tree.into(), 5, 5);
-  game.run(Sand.into(), 6, 5);
-  game.run(Rock.into(), 7, 4);
-  while game.next_round().is_some() {
-    sleep(std::time::Duration::from_secs(1));
-    game.next_round();
   }
 }
 
@@ -195,12 +206,13 @@ struct Game {
 }
 
 impl Game {
+  fn new(system: System<FEATURE_SIZE>) -> Self {
+    Self { round: 0, system }
+  }
   fn run(&mut self, trigger: &Features<FEATURE_SIZE>, x: usize, y: usize) {
     use Direction::*;
     System::propagate(&mut self.system.grid, trigger, Direct, x, y);
     self.round += 1;
-    println!("RND {}", self.round);
-    println!("{}", self.system.show());
   }
   fn next_round(&mut self) -> Option<()> {
     let ((x, y), low_entropy_node) = self
@@ -248,14 +260,14 @@ fn get_rnd_tile<const N: usize>(superposition: &Features<N>, rnd: &mut impl rand
 // ================
 
 pub fn bench() {
-  use Direction::*;
-  use Tile::*;
-
-  let mut system = System::default();
-  System::propagate(&mut system.grid, Water.into(), Direct, 1, 1);
-  System::propagate(&mut system.grid, Sand.into(), Direct, 1, 2);
-  System::propagate(&mut system.grid, Sand.into(), Direct, 2, 1);
-  System::propagate(&mut system.grid, Grass.into(), Direct, 0, 0);
+  let system = System {
+    weights: [0.25; FEATURE_SIZE],
+    grid: Array2::default((30, 30)),
+  };
+  let mut game = Game::new(system);
+  while game.next_round().is_some() {
+    game.next_round();
+  }
 }
 
 //test get_rnd_tile

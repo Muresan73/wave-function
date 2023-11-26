@@ -1,0 +1,491 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="566" onload="init(evt)" viewBox="0 0 1200 566" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:monospace; font-size:12px }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = false;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="566" fill="url(#background)"/><text id="title" fill="rgb(0,0,0)" x="50.0000%" y="24.00">Flame Graph</text><text id="details" fill="rgb(0,0,0)" x="10" y="549.00"> </text><text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="24.00">Reset Zoom</text><text id="search" fill="rgb(0,0,0)" x="1190" y="24.00">Search</text><text id="matched" fill="rgb(0,0,0)" x="1190" y="549.00"> </text><svg id="frames" x="10" width="1180" total_samples="939"><g><title>wave-function`&lt;wave_function::node::System&lt;_&gt; as wave_function::node::Wave&lt;_&gt;&gt;::show::_{{closure}}::_{{closure}} (1 samples, 0.11%)</title><rect x="0.0000%" y="85" width="0.1065%" height="15" fill="rgb(227,0,7)" fg:x="0" fg:w="1"/><text x="0.2500%" y="95.50"></text></g><g><title>wave-function`&lt;T as alloc::string::ToString&gt;::to_string (1 samples, 0.11%)</title><rect x="0.0000%" y="69" width="0.1065%" height="15" fill="rgb(217,0,24)" fg:x="0" fg:w="1"/><text x="0.2500%" y="79.50"></text></g><g><title>wave-function`&lt;wave_function::node::Node&lt;_&gt; as core::fmt::Display&gt;::fmt (1 samples, 0.11%)</title><rect x="0.0000%" y="53" width="0.1065%" height="15" fill="rgb(221,193,54)" fg:x="0" fg:w="1"/><text x="0.2500%" y="63.50"></text></g><g><title>wave-function`core::fmt::Arguments::new_v1 (1 samples, 0.11%)</title><rect x="0.0000%" y="37" width="0.1065%" height="15" fill="rgb(248,212,6)" fg:x="0" fg:w="1"/><text x="0.2500%" y="47.50"></text></g><g><title>wave-function`&lt;wave_function::node::System&lt;_&gt; as wave_function::node::Wave&lt;_&gt;&gt;::show (2 samples, 0.21%)</title><rect x="0.0000%" y="357" width="0.2130%" height="15" fill="rgb(208,68,35)" fg:x="0" fg:w="2"/><text x="0.2500%" y="367.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::collect (2 samples, 0.21%)</title><rect x="0.0000%" y="341" width="0.2130%" height="15" fill="rgb(232,128,0)" fg:x="0" fg:w="2"/><text x="0.2500%" y="351.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T&gt; as core::iter::traits::collect::FromIterator&lt;T&gt;&gt;::from_iter (2 samples, 0.21%)</title><rect x="0.0000%" y="325" width="0.2130%" height="15" fill="rgb(207,160,47)" fg:x="0" fg:w="2"/><text x="0.2500%" y="335.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (2 samples, 0.21%)</title><rect x="0.0000%" y="309" width="0.2130%" height="15" fill="rgb(228,23,34)" fg:x="0" fg:w="2"/><text x="0.2500%" y="319.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter_nested::SpecFromIterNested&lt;T,I&gt;&gt;::from_iter (2 samples, 0.21%)</title><rect x="0.0000%" y="293" width="0.2130%" height="15" fill="rgb(218,30,26)" fg:x="0" fg:w="2"/><text x="0.2500%" y="303.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T,A&gt; as alloc::vec::spec_extend::SpecExtend&lt;T,I&gt;&gt;::spec_extend (2 samples, 0.21%)</title><rect x="0.0000%" y="277" width="0.2130%" height="15" fill="rgb(220,122,19)" fg:x="0" fg:w="2"/><text x="0.2500%" y="287.50"></text></g><g><title>wave-function`alloc::vec::Vec&lt;T,A&gt;::extend_desugared (2 samples, 0.21%)</title><rect x="0.0000%" y="261" width="0.2130%" height="15" fill="rgb(250,228,42)" fg:x="0" fg:w="2"/><text x="0.2500%" y="271.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::next (2 samples, 0.21%)</title><rect x="0.0000%" y="245" width="0.2130%" height="15" fill="rgb(240,193,28)" fg:x="0" fg:w="2"/><text x="0.2500%" y="255.50"></text></g><g><title>wave-function`core::ops::function::impls::_&lt;impl core::ops::function::FnOnce&lt;A&gt; for &amp;mut F&gt;::call_once (2 samples, 0.21%)</title><rect x="0.0000%" y="229" width="0.2130%" height="15" fill="rgb(216,20,37)" fg:x="0" fg:w="2"/><text x="0.2500%" y="239.50"></text></g><g><title>wave-function`&lt;wave_function::node::System&lt;_&gt; as wave_function::node::Wave&lt;_&gt;&gt;::show::_{{closure}} (2 samples, 0.21%)</title><rect x="0.0000%" y="213" width="0.2130%" height="15" fill="rgb(206,188,39)" fg:x="0" fg:w="2"/><text x="0.2500%" y="223.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::collect (2 samples, 0.21%)</title><rect x="0.0000%" y="197" width="0.2130%" height="15" fill="rgb(217,207,13)" fg:x="0" fg:w="2"/><text x="0.2500%" y="207.50"></text></g><g><title>wave-function`&lt;alloc::string::String as core::iter::traits::collect::FromIterator&lt;alloc::string::String&gt;&gt;::from_iter (2 samples, 0.21%)</title><rect x="0.0000%" y="181" width="0.2130%" height="15" fill="rgb(231,73,38)" fg:x="0" fg:w="2"/><text x="0.2500%" y="191.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::for_each (2 samples, 0.21%)</title><rect x="0.0000%" y="165" width="0.2130%" height="15" fill="rgb(225,20,46)" fg:x="0" fg:w="2"/><text x="0.2500%" y="175.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (2 samples, 0.21%)</title><rect x="0.0000%" y="149" width="0.2130%" height="15" fill="rgb(210,31,41)" fg:x="0" fg:w="2"/><text x="0.2500%" y="159.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::Iter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::fold (2 samples, 0.21%)</title><rect x="0.0000%" y="133" width="0.2130%" height="15" fill="rgb(221,200,47)" fg:x="0" fg:w="2"/><text x="0.2500%" y="143.50"></text></g><g><title>wave-function`&lt;core::slice::iter::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::fold (2 samples, 0.21%)</title><rect x="0.0000%" y="117" width="0.2130%" height="15" fill="rgb(226,26,5)" fg:x="0" fg:w="2"/><text x="0.2500%" y="127.50"></text></g><g><title>wave-function`core::iter::adapters::map::map_fold::_{{closure}} (2 samples, 0.21%)</title><rect x="0.0000%" y="101" width="0.2130%" height="15" fill="rgb(249,33,26)" fg:x="0" fg:w="2"/><text x="0.2500%" y="111.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::for_each::call::_{{closure}} (1 samples, 0.11%)</title><rect x="0.1065%" y="85" width="0.1065%" height="15" fill="rgb(235,183,28)" fg:x="1" fg:w="1"/><text x="0.3565%" y="95.50"></text></g><g><title>wave-function`&lt;alloc::string::String as core::iter::traits::collect::Extend&lt;alloc::string::String&gt;&gt;::extend::_{{closure}} (1 samples, 0.11%)</title><rect x="0.1065%" y="69" width="0.1065%" height="15" fill="rgb(221,5,38)" fg:x="1" fg:w="1"/><text x="0.3565%" y="79.50"></text></g><g><title>wave-function`alloc::vec::Vec&lt;T,A&gt;::extend_from_slice (1 samples, 0.11%)</title><rect x="0.1065%" y="53" width="0.1065%" height="15" fill="rgb(247,18,42)" fg:x="1" fg:w="1"/><text x="0.3565%" y="63.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T,A&gt; as alloc::vec::spec_extend::SpecExtend&lt;&amp;T,core::slice::iter::Iter&lt;T&gt;&gt;&gt;::spec_extend (1 samples, 0.11%)</title><rect x="0.1065%" y="37" width="0.1065%" height="15" fill="rgb(241,131,45)" fg:x="1" fg:w="1"/><text x="0.3565%" y="47.50"></text></g><g><title>wave-function`ndarray::impl_methods::_&lt;impl ndarray::ArrayBase&lt;S,D&gt;&gt;::indexed_iter (1 samples, 0.11%)</title><rect x="0.2130%" y="357" width="0.1065%" height="15" fill="rgb(249,31,29)" fg:x="2" fg:w="1"/><text x="0.4630%" y="367.50"></text></g><g><title>wave-function`&lt;rand::rngs::thread::ThreadRng as core::default::Default&gt;::default (1 samples, 0.11%)</title><rect x="0.3195%" y="341" width="0.1065%" height="15" fill="rgb(225,111,53)" fg:x="3" fg:w="1"/><text x="0.5695%" y="351.50"></text></g><g><title>wave-function`rand::rngs::thread::thread_rng (1 samples, 0.11%)</title><rect x="0.3195%" y="325" width="0.1065%" height="15" fill="rgb(238,160,17)" fg:x="3" fg:w="1"/><text x="0.5695%" y="335.50"></text></g><g><title>wave-function`std::thread::local::LocalKey&lt;T&gt;::with (1 samples, 0.11%)</title><rect x="0.3195%" y="309" width="0.1065%" height="15" fill="rgb(214,148,48)" fg:x="3" fg:w="1"/><text x="0.5695%" y="319.50"></text></g><g><title>wave-function`std::thread::local::LocalKey&lt;T&gt;::try_with (1 samples, 0.11%)</title><rect x="0.3195%" y="293" width="0.1065%" height="15" fill="rgb(232,36,49)" fg:x="3" fg:w="1"/><text x="0.5695%" y="303.50"></text></g><g><title>wave-function`rand::rngs::thread::thread_rng::_{{closure}} (1 samples, 0.11%)</title><rect x="0.3195%" y="277" width="0.1065%" height="15" fill="rgb(209,103,24)" fg:x="3" fg:w="1"/><text x="0.5695%" y="287.50"></text></g><g><title>wave-function`&lt;alloc::rc::Rc&lt;T,A&gt; as core::clone::Clone&gt;::clone (1 samples, 0.11%)</title><rect x="0.3195%" y="261" width="0.1065%" height="15" fill="rgb(229,88,8)" fg:x="3" fg:w="1"/><text x="0.5695%" y="271.50"></text></g><g><title>wave-function`alloc::rc::RcInnerPtr::inc_strong (1 samples, 0.11%)</title><rect x="0.3195%" y="245" width="0.1065%" height="15" fill="rgb(213,181,19)" fg:x="3" fg:w="1"/><text x="0.5695%" y="255.50"></text></g><g><title>wave-function`alloc::rc::RcInnerPtr::strong (1 samples, 0.11%)</title><rect x="0.3195%" y="229" width="0.1065%" height="15" fill="rgb(254,191,54)" fg:x="3" fg:w="1"/><text x="0.5695%" y="239.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::IndexedIter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (2 samples, 0.21%)</title><rect x="0.4260%" y="277" width="0.2130%" height="15" fill="rgb(241,83,37)" fg:x="4" fg:w="2"/><text x="0.6760%" y="287.50"></text></g><g><title>wave-function`core::iter::adapters::filter::filter_fold::_{{closure}} (2 samples, 0.21%)</title><rect x="0.6390%" y="277" width="0.2130%" height="15" fill="rgb(233,36,39)" fg:x="6" fg:w="2"/><text x="0.8890%" y="287.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;[usize (1 samples, 0.11%)</title><rect x="1.5974%" y="261" width="0.1065%" height="15" fill="rgb(226,3,54)" fg:x="15" fg:w="1"/><text x="1.8474%" y="271.50"></text></g><g><title> 2]&gt; as ndarray::dimension::dimension_trait::Dimension&gt;::into_pattern (1 samples, 0.11%)</title><rect x="1.5974%" y="245" width="0.1065%" height="15" fill="rgb(245,192,40)" fg:x="15" fg:w="1"/><text x="1.8474%" y="255.50"></text></g><g><title>wave-function`&lt;[usize (1 samples, 0.11%)</title><rect x="5.1118%" y="245" width="0.1065%" height="15" fill="rgb(238,167,29)" fg:x="48" fg:w="1"/><text x="5.3618%" y="255.50"></text></g><g><title> 2] as ndarray::dimension::conversion::Convert&gt;::convert (1 samples, 0.11%)</title><rect x="5.1118%" y="229" width="0.1065%" height="15" fill="rgb(232,182,51)" fg:x="48" fg:w="1"/><text x="5.3618%" y="239.50"></text></g><g><title>wave-function`&lt;T as core::array::SpecArrayClone&gt;::clone (1 samples, 0.11%)</title><rect x="5.4313%" y="229" width="0.1065%" height="15" fill="rgb(231,60,39)" fg:x="51" fg:w="1"/><text x="5.6813%" y="239.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;I&gt; as core::clone::Clone&gt;::clone (8 samples, 0.85%)</title><rect x="5.2183%" y="245" width="0.8520%" height="15" fill="rgb(208,69,12)" fg:x="49" fg:w="8"/><text x="5.4683%" y="255.50"></text></g><g><title>wave-function`core::array::_&lt;impl core::clone::Clone for [T (5 samples, 0.53%)</title><rect x="5.5378%" y="229" width="0.5325%" height="15" fill="rgb(235,93,37)" fg:x="52" fg:w="5"/><text x="5.7878%" y="239.50"></text></g><g><title> N]&gt;::clone (5 samples, 0.53%)</title><rect x="5.5378%" y="213" width="0.5325%" height="15" fill="rgb(213,116,39)" fg:x="52" fg:w="5"/><text x="5.7878%" y="223.50"></text></g><g><title>wave-function`&lt;T as core::array::SpecArrayClone&gt;::clone (2 samples, 0.21%)</title><rect x="5.8573%" y="197" width="0.2130%" height="15" fill="rgb(222,207,29)" fg:x="55" fg:w="2"/><text x="6.1073%" y="207.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;[usize (23 samples, 2.45%)</title><rect x="6.0703%" y="245" width="2.4494%" height="15" fill="rgb(206,96,30)" fg:x="57" fg:w="23"/><text x="6.3203%" y="255.50">wa..</text></g><g><title> 2]&gt; as ndarray::dimension::dimension_trait::Dimension&gt;::into_pattern (23 samples, 2.45%)</title><rect x="6.0703%" y="229" width="2.4494%" height="15" fill="rgb(218,138,4)" fg:x="57" fg:w="23"/><text x="6.3203%" y="239.50"> 2..</text></g><g><title>wave-function`&lt;[usize (6 samples, 0.64%)</title><rect x="7.8807%" y="213" width="0.6390%" height="15" fill="rgb(250,191,14)" fg:x="74" fg:w="6"/><text x="8.1307%" y="223.50"></text></g><g><title> 2] as ndarray::dimension::conversion::Convert&gt;::convert (6 samples, 0.64%)</title><rect x="7.8807%" y="197" width="0.6390%" height="15" fill="rgb(239,60,40)" fg:x="74" fg:w="6"/><text x="8.1307%" y="207.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::Baseiter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (1 samples, 0.11%)</title><rect x="8.5197%" y="245" width="0.1065%" height="15" fill="rgb(206,27,48)" fg:x="80" fg:w="1"/><text x="8.7697%" y="255.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;I&gt; as core::clone::Clone&gt;::clone (1 samples, 0.11%)</title><rect x="8.8392%" y="229" width="0.1065%" height="15" fill="rgb(225,35,8)" fg:x="83" fg:w="1"/><text x="9.0892%" y="239.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;[usize (1 samples, 0.11%)</title><rect x="8.9457%" y="229" width="0.1065%" height="15" fill="rgb(250,213,24)" fg:x="84" fg:w="1"/><text x="9.1957%" y="239.50"></text></g><g><title> 2]&gt; as ndarray::dimension::dimension_trait::Dimension&gt;::next_for (1 samples, 0.11%)</title><rect x="8.9457%" y="213" width="0.1065%" height="15" fill="rgb(247,123,22)" fg:x="84" fg:w="1"/><text x="9.1957%" y="223.50"></text></g><g><title>wave-function`&lt;T as core::array::SpecArrayClone&gt;::clone (7 samples, 0.75%)</title><rect x="15.5485%" y="197" width="0.7455%" height="15" fill="rgb(231,138,38)" fg:x="146" fg:w="7"/><text x="15.7985%" y="207.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;I&gt; as core::clone::Clone&gt;::clone (17 samples, 1.81%)</title><rect x="14.9095%" y="213" width="1.8104%" height="15" fill="rgb(231,145,46)" fg:x="140" fg:w="17"/><text x="15.1595%" y="223.50">w..</text></g><g><title>wave-function`core::array::_&lt;impl core::clone::Clone for [T (4 samples, 0.43%)</title><rect x="16.2939%" y="197" width="0.4260%" height="15" fill="rgb(251,118,11)" fg:x="153" fg:w="4"/><text x="16.5439%" y="207.50"></text></g><g><title> N]&gt;::clone (4 samples, 0.43%)</title><rect x="16.2939%" y="181" width="0.4260%" height="15" fill="rgb(217,147,25)" fg:x="153" fg:w="4"/><text x="16.5439%" y="191.50"></text></g><g><title>wave-function`&lt;T as core::array::SpecArrayClone&gt;::clone (2 samples, 0.21%)</title><rect x="16.5069%" y="165" width="0.2130%" height="15" fill="rgb(247,81,37)" fg:x="155" fg:w="2"/><text x="16.7569%" y="175.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;[usize (41 samples, 4.37%)</title><rect x="16.7199%" y="213" width="4.3663%" height="15" fill="rgb(209,12,38)" fg:x="157" fg:w="41"/><text x="16.9699%" y="223.50">wave-..</text></g><g><title> 2]&gt; as ndarray::dimension::dimension_trait::Dimension&gt;::next_for (41 samples, 4.37%)</title><rect x="16.7199%" y="197" width="4.3663%" height="15" fill="rgb(227,1,9)" fg:x="157" fg:w="41"/><text x="16.9699%" y="207.50"> 2]&gt; ..</text></g><g><title>wave-function`ndarray::dimension::dim::Dim&lt;I&gt;::new (20 samples, 2.13%)</title><rect x="18.9563%" y="181" width="2.1299%" height="15" fill="rgb(248,47,43)" fg:x="178" fg:w="20"/><text x="19.2063%" y="191.50">w..</text></g><g><title>wave-function`&lt;ndarray::iterators::Baseiter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (116 samples, 12.35%)</title><rect x="9.0522%" y="229" width="12.3536%" height="15" fill="rgb(221,10,30)" fg:x="85" fg:w="116"/><text x="9.3022%" y="239.50">wave-function`&lt;nda..</text></g><g><title>wave-function`ndarray::dimension::dim::Dim&lt;I&gt;::new (3 samples, 0.32%)</title><rect x="21.0863%" y="213" width="0.3195%" height="15" fill="rgb(210,229,1)" fg:x="198" fg:w="3"/><text x="21.3363%" y="223.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::ElementsBase&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (134 samples, 14.27%)</title><rect x="8.6262%" y="245" width="14.2705%" height="15" fill="rgb(222,148,37)" fg:x="81" fg:w="134"/><text x="8.8762%" y="255.50">wave-function`&lt;ndarray..</text></g><g><title>wave-function`core::option::Option&lt;T&gt;::map (14 samples, 1.49%)</title><rect x="21.4058%" y="229" width="1.4909%" height="15" fill="rgb(234,67,33)" fg:x="201" fg:w="14"/><text x="21.6558%" y="239.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::ElementsBase&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next::_{{closure}} (5 samples, 0.53%)</title><rect x="22.3642%" y="213" width="0.5325%" height="15" fill="rgb(247,98,35)" fg:x="210" fg:w="5"/><text x="22.6142%" y="223.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::IndexedIter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (200 samples, 21.30%)</title><rect x="1.7039%" y="261" width="21.2993%" height="15" fill="rgb(247,138,52)" fg:x="16" fg:w="200"/><text x="1.9539%" y="271.50">wave-function`&lt;ndarray::iterators:..</text></g><g><title>wave-function`core::option::Option&lt;T&gt;::map (1 samples, 0.11%)</title><rect x="22.8967%" y="245" width="0.1065%" height="15" fill="rgb(213,79,30)" fg:x="215" fg:w="1"/><text x="23.1467%" y="255.50"></text></g><g><title>wave-function`core::cmp::min_by (3 samples, 0.32%)</title><rect x="24.6006%" y="245" width="0.3195%" height="15" fill="rgb(246,177,23)" fg:x="231" fg:w="3"/><text x="24.8506%" y="255.50"></text></g><g><title>wave-function`core::ops::function::FnMut::call_mut (1 samples, 0.11%)</title><rect x="27.2630%" y="213" width="0.1065%" height="15" fill="rgb(230,62,27)" fg:x="256" fg:w="1"/><text x="27.5130%" y="223.50"></text></g><g><title>wave-function`core::cmp::impls::_&lt;impl core::cmp::Ord for usize&gt;::cmp (1 samples, 0.11%)</title><rect x="30.0319%" y="165" width="0.1065%" height="15" fill="rgb(216,154,8)" fg:x="282" fg:w="1"/><text x="30.2819%" y="175.50"></text></g><g><title>wave-function`core::ops::function::FnMut::call_mut (54 samples, 5.75%)</title><rect x="27.9020%" y="197" width="5.7508%" height="15" fill="rgb(244,35,45)" fg:x="262" fg:w="54"/><text x="28.1520%" y="207.50">wave-fu..</text></g><g><title>wave-function`core::tuple::_&lt;impl core::cmp::Ord for (U,T)&gt;::cmp (51 samples, 5.43%)</title><rect x="28.2215%" y="181" width="5.4313%" height="15" fill="rgb(251,115,12)" fg:x="265" fg:w="51"/><text x="28.4715%" y="191.50">wave-fu..</text></g><g><title>wave-function`core::tuple::_&lt;impl core::cmp::Ord for (U,T)&gt;::cmp (33 samples, 3.51%)</title><rect x="30.1384%" y="165" width="3.5144%" height="15" fill="rgb(240,54,50)" fg:x="283" fg:w="33"/><text x="30.3884%" y="175.50">wav..</text></g><g><title>wave-function`core::cmp::impls::_&lt;impl core::cmp::Ord for usize&gt;::cmp (16 samples, 1.70%)</title><rect x="31.9489%" y="149" width="1.7039%" height="15" fill="rgb(233,84,52)" fg:x="300" fg:w="16"/><text x="32.1989%" y="159.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::min_by::fold::_{{closure}} (84 samples, 8.95%)</title><rect x="24.9201%" y="245" width="8.9457%" height="15" fill="rgb(207,117,47)" fg:x="234" fg:w="84"/><text x="25.1701%" y="255.50">wave-function..</text></g><g><title>wave-function`core::cmp::min_by (78 samples, 8.31%)</title><rect x="25.5591%" y="229" width="8.3067%" height="15" fill="rgb(249,43,39)" fg:x="240" fg:w="78"/><text x="25.8091%" y="239.50">wave-functio..</text></g><g><title>wave-function`core::ops::function::impls::_&lt;impl core::ops::function::FnOnce&lt;A&gt; for &amp;mut F&gt;::call_once (61 samples, 6.50%)</title><rect x="27.3695%" y="213" width="6.4963%" height="15" fill="rgb(209,38,44)" fg:x="257" fg:w="61"/><text x="27.6195%" y="223.50">wave-func..</text></g><g><title>wave-function`core::tuple::_&lt;impl core::cmp::Ord for (U,T)&gt;::cmp (2 samples, 0.21%)</title><rect x="33.6528%" y="197" width="0.2130%" height="15" fill="rgb(236,212,23)" fg:x="316" fg:w="2"/><text x="33.9028%" y="207.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::sum (1 samples, 0.11%)</title><rect x="34.3983%" y="229" width="0.1065%" height="15" fill="rgb(242,79,21)" fg:x="323" fg:w="1"/><text x="34.6483%" y="239.50"></text></g><g><title>wave-function`&lt;core::slice::iter::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::fold (1 samples, 0.11%)</title><rect x="34.9308%" y="197" width="0.1065%" height="15" fill="rgb(211,96,35)" fg:x="328" fg:w="1"/><text x="35.1808%" y="207.50"></text></g><g><title>wave-function`&lt;core::slice::iter::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::fold (153 samples, 16.29%)</title><rect x="35.1438%" y="181" width="16.2939%" height="15" fill="rgb(253,215,40)" fg:x="330" fg:w="153"/><text x="35.3938%" y="191.50">wave-function`&lt;core::slic..</text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum::_{{closure}} (38 samples, 4.05%)</title><rect x="47.3908%" y="165" width="4.0469%" height="15" fill="rgb(211,81,21)" fg:x="445" fg:w="38"/><text x="47.6408%" y="175.50">wave..</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::sum (162 samples, 17.25%)</title><rect x="34.7178%" y="213" width="17.2524%" height="15" fill="rgb(208,190,38)" fg:x="326" fg:w="162"/><text x="34.9678%" y="223.50">wave-function`core::iter::t..</text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum (159 samples, 16.93%)</title><rect x="35.0373%" y="197" width="16.9329%" height="15" fill="rgb(235,213,38)" fg:x="329" fg:w="159"/><text x="35.2873%" y="207.50">wave-function`&lt;usize as co..</text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum::_{{closure}} (5 samples, 0.53%)</title><rect x="51.4377%" y="181" width="0.5325%" height="15" fill="rgb(237,122,38)" fg:x="483" fg:w="5"/><text x="51.6877%" y="191.50"></text></g><g><title>wave-function`wave_function::node::Game::next_round::_{{closure}} (184 samples, 19.60%)</title><rect x="33.8658%" y="245" width="19.5953%" height="15" fill="rgb(244,218,35)" fg:x="318" fg:w="184"/><text x="34.1158%" y="255.50">wave-function`wave_function::no..</text></g><g><title>wave-function`wave_function::node::Node&lt;_&gt;::get_entropy (178 samples, 18.96%)</title><rect x="34.5048%" y="229" width="18.9563%" height="15" fill="rgb(240,68,47)" fg:x="324" fg:w="178"/><text x="34.7548%" y="239.50">wave-function`wave_function::n..</text></g><g><title>wave-function`core::slice::_&lt;impl [T]&gt;::iter (14 samples, 1.49%)</title><rect x="51.9702%" y="213" width="1.4909%" height="15" fill="rgb(210,16,53)" fg:x="488" fg:w="14"/><text x="52.2202%" y="223.50"></text></g><g><title>wave-function`core::iter::adapters::filter::filter_fold::_{{closure}} (287 samples, 30.56%)</title><rect x="23.0032%" y="261" width="30.5644%" height="15" fill="rgb(235,124,12)" fg:x="216" fg:w="287"/><text x="23.2532%" y="271.50">wave-function`core::iter::adapters::filter::filte..</text></g><g><title>wave-function`wave_function::node::Node&lt;_&gt;::get_entropy (1 samples, 0.11%)</title><rect x="53.4611%" y="245" width="0.1065%" height="15" fill="rgb(224,169,11)" fg:x="502" fg:w="1"/><text x="53.7111%" y="255.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::filter::Filter&lt;I,P&gt; as core::iter::traits::iterator::Iterator&gt;::fold (500 samples, 53.25%)</title><rect x="0.4260%" y="293" width="53.2481%" height="15" fill="rgb(250,166,2)" fg:x="4" fg:w="500"/><text x="0.6760%" y="303.50">wave-function`&lt;core::iter::adapters::filter::Filter&lt;I,P&gt; as core::iter::traits::iterator..</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::fold (496 samples, 52.82%)</title><rect x="0.8520%" y="277" width="52.8222%" height="15" fill="rgb(242,216,29)" fg:x="8" fg:w="496"/><text x="1.1020%" y="287.50">wave-function`core::iter::traits::iterator::Iterator::fold</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::min_by::fold::_{{closure}} (1 samples, 0.11%)</title><rect x="53.5676%" y="261" width="0.1065%" height="15" fill="rgb(230,116,27)" fg:x="503" fg:w="1"/><text x="53.8176%" y="271.50"></text></g><g><title>wave-function`&lt;core::ops::control_flow::ControlFlow&lt;B,C&gt; as core::ops::try_trait::Try&gt;::branch (2 samples, 0.21%)</title><rect x="53.6741%" y="261" width="0.2130%" height="15" fill="rgb(228,99,48)" fg:x="504" fg:w="2"/><text x="53.9241%" y="271.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::IndexedIter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (1 samples, 0.11%)</title><rect x="53.8871%" y="261" width="0.1065%" height="15" fill="rgb(253,11,6)" fg:x="506" fg:w="1"/><text x="54.1371%" y="271.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::find::check::_{{closure}} (4 samples, 0.43%)</title><rect x="53.9936%" y="261" width="0.4260%" height="15" fill="rgb(247,143,39)" fg:x="507" fg:w="4"/><text x="54.2436%" y="271.50"></text></g><g><title>wave-function`&lt;core::ops::control_flow::ControlFlow&lt;B,C&gt; as core::ops::try_trait::Try&gt;::branch (1 samples, 0.11%)</title><rect x="55.8040%" y="245" width="0.1065%" height="15" fill="rgb(236,97,10)" fg:x="524" fg:w="1"/><text x="56.0540%" y="255.50"></text></g><g><title>wave-function`&lt;[usize (1 samples, 0.11%)</title><rect x="59.2119%" y="229" width="0.1065%" height="15" fill="rgb(233,208,19)" fg:x="556" fg:w="1"/><text x="59.4619%" y="239.50"></text></g><g><title> 2] as ndarray::dimension::conversion::Convert&gt;::convert (1 samples, 0.11%)</title><rect x="59.2119%" y="213" width="0.1065%" height="15" fill="rgb(216,164,2)" fg:x="556" fg:w="1"/><text x="59.4619%" y="223.50"></text></g><g><title>wave-function`&lt;T as core::array::SpecArrayClone&gt;::clone (1 samples, 0.11%)</title><rect x="60.1704%" y="213" width="0.1065%" height="15" fill="rgb(220,129,5)" fg:x="565" fg:w="1"/><text x="60.4204%" y="223.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;I&gt; as core::clone::Clone&gt;::clone (13 samples, 1.38%)</title><rect x="59.3184%" y="229" width="1.3845%" height="15" fill="rgb(242,17,10)" fg:x="557" fg:w="13"/><text x="59.5684%" y="239.50"></text></g><g><title>wave-function`core::array::_&lt;impl core::clone::Clone for [T (4 samples, 0.43%)</title><rect x="60.2769%" y="213" width="0.4260%" height="15" fill="rgb(242,107,0)" fg:x="566" fg:w="4"/><text x="60.5269%" y="223.50"></text></g><g><title> N]&gt;::clone (4 samples, 0.43%)</title><rect x="60.2769%" y="197" width="0.4260%" height="15" fill="rgb(251,28,31)" fg:x="566" fg:w="4"/><text x="60.5269%" y="207.50"></text></g><g><title>wave-function`&lt;T as core::array::SpecArrayClone&gt;::clone (2 samples, 0.21%)</title><rect x="60.4899%" y="181" width="0.2130%" height="15" fill="rgb(233,223,10)" fg:x="568" fg:w="2"/><text x="60.7399%" y="191.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;[usize (18 samples, 1.92%)</title><rect x="60.7029%" y="229" width="1.9169%" height="15" fill="rgb(215,21,27)" fg:x="570" fg:w="18"/><text x="60.9529%" y="239.50">w..</text></g><g><title> 2]&gt; as ndarray::dimension::dimension_trait::Dimension&gt;::into_pattern (18 samples, 1.92%)</title><rect x="60.7029%" y="213" width="1.9169%" height="15" fill="rgb(232,23,21)" fg:x="570" fg:w="18"/><text x="60.9529%" y="223.50"> ..</text></g><g><title>wave-function`&lt;[usize (4 samples, 0.43%)</title><rect x="62.1938%" y="197" width="0.4260%" height="15" fill="rgb(244,5,23)" fg:x="584" fg:w="4"/><text x="62.4438%" y="207.50"></text></g><g><title> 2] as ndarray::dimension::conversion::Convert&gt;::convert (4 samples, 0.43%)</title><rect x="62.1938%" y="181" width="0.4260%" height="15" fill="rgb(226,81,46)" fg:x="584" fg:w="4"/><text x="62.4438%" y="191.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::Baseiter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (2 samples, 0.21%)</title><rect x="62.6198%" y="229" width="0.2130%" height="15" fill="rgb(247,70,30)" fg:x="588" fg:w="2"/><text x="62.8698%" y="239.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;I&gt; as core::clone::Clone&gt;::clone (1 samples, 0.11%)</title><rect x="63.2588%" y="213" width="0.1065%" height="15" fill="rgb(212,68,19)" fg:x="594" fg:w="1"/><text x="63.5088%" y="223.50"></text></g><g><title>wave-function`&lt;T as core::array::SpecArrayClone&gt;::clone (2 samples, 0.21%)</title><rect x="69.7551%" y="181" width="0.2130%" height="15" fill="rgb(240,187,13)" fg:x="655" fg:w="2"/><text x="70.0051%" y="191.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;I&gt; as core::clone::Clone&gt;::clone (14 samples, 1.49%)</title><rect x="69.1161%" y="197" width="1.4909%" height="15" fill="rgb(223,113,26)" fg:x="649" fg:w="14"/><text x="69.3661%" y="207.50"></text></g><g><title>wave-function`core::array::_&lt;impl core::clone::Clone for [T (6 samples, 0.64%)</title><rect x="69.9681%" y="181" width="0.6390%" height="15" fill="rgb(206,192,2)" fg:x="657" fg:w="6"/><text x="70.2181%" y="191.50"></text></g><g><title> N]&gt;::clone (6 samples, 0.64%)</title><rect x="69.9681%" y="165" width="0.6390%" height="15" fill="rgb(241,108,4)" fg:x="657" fg:w="6"/><text x="70.2181%" y="175.50"></text></g><g><title>wave-function`&lt;ndarray::dimension::dim::Dim&lt;[usize (45 samples, 4.79%)</title><rect x="70.6070%" y="197" width="4.7923%" height="15" fill="rgb(247,173,49)" fg:x="663" fg:w="45"/><text x="70.8570%" y="207.50">wave-f..</text></g><g><title> 2]&gt; as ndarray::dimension::dimension_trait::Dimension&gt;::next_for (45 samples, 4.79%)</title><rect x="70.6070%" y="181" width="4.7923%" height="15" fill="rgb(224,114,35)" fg:x="663" fg:w="45"/><text x="70.8570%" y="191.50"> 2]&gt; a..</text></g><g><title>wave-function`ndarray::dimension::dim::Dim&lt;I&gt;::new (20 samples, 2.13%)</title><rect x="73.2694%" y="165" width="2.1299%" height="15" fill="rgb(245,159,27)" fg:x="688" fg:w="20"/><text x="73.5194%" y="175.50">w..</text></g><g><title>wave-function`&lt;ndarray::iterators::Baseiter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (114 samples, 12.14%)</title><rect x="63.3653%" y="213" width="12.1406%" height="15" fill="rgb(245,172,44)" fg:x="595" fg:w="114"/><text x="63.6153%" y="223.50">wave-function`&lt;nda..</text></g><g><title>wave-function`core::array::_&lt;impl core::clone::Clone for [T (1 samples, 0.11%)</title><rect x="75.3994%" y="197" width="0.1065%" height="15" fill="rgb(236,23,11)" fg:x="708" fg:w="1"/><text x="75.6494%" y="207.50"></text></g><g><title> N]&gt;::clone (1 samples, 0.11%)</title><rect x="75.3994%" y="181" width="0.1065%" height="15" fill="rgb(205,117,38)" fg:x="708" fg:w="1"/><text x="75.6494%" y="191.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::IndexedIter&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (194 samples, 20.66%)</title><rect x="55.9105%" y="245" width="20.6603%" height="15" fill="rgb(237,72,25)" fg:x="525" fg:w="194"/><text x="56.1605%" y="255.50">wave-function`&lt;ndarray::iterators..</text></g><g><title>wave-function`&lt;ndarray::iterators::ElementsBase&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next (129 samples, 13.74%)</title><rect x="62.8328%" y="229" width="13.7380%" height="15" fill="rgb(244,70,9)" fg:x="590" fg:w="129"/><text x="63.0828%" y="239.50">wave-function`&lt;ndarra..</text></g><g><title>wave-function`core::option::Option&lt;T&gt;::map (10 samples, 1.06%)</title><rect x="75.5059%" y="213" width="1.0650%" height="15" fill="rgb(217,125,39)" fg:x="709" fg:w="10"/><text x="75.7559%" y="223.50"></text></g><g><title>wave-function`&lt;ndarray::iterators::ElementsBase&lt;A,D&gt; as core::iter::traits::iterator::Iterator&gt;::next::_{{closure}} (3 samples, 0.32%)</title><rect x="76.2513%" y="197" width="0.3195%" height="15" fill="rgb(235,36,10)" fg:x="716" fg:w="3"/><text x="76.5013%" y="207.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::sum (1 samples, 0.11%)</title><rect x="78.5942%" y="197" width="0.1065%" height="15" fill="rgb(251,123,47)" fg:x="738" fg:w="1"/><text x="78.8442%" y="207.50"></text></g><g><title>wave-function`core::slice::_&lt;impl [T]&gt;::iter (3 samples, 0.32%)</title><rect x="78.7007%" y="197" width="0.3195%" height="15" fill="rgb(221,13,13)" fg:x="739" fg:w="3"/><text x="78.9507%" y="207.50"></text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum (1 samples, 0.11%)</title><rect x="79.6592%" y="181" width="0.1065%" height="15" fill="rgb(238,131,9)" fg:x="748" fg:w="1"/><text x="79.9092%" y="191.50"></text></g><g><title>wave-function`&lt;core::slice::iter::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::fold (1 samples, 0.11%)</title><rect x="79.7657%" y="165" width="0.1065%" height="15" fill="rgb(211,50,8)" fg:x="749" fg:w="1"/><text x="80.0157%" y="175.50"></text></g><g><title>wave-function`&lt;core::slice::iter::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::fold (159 samples, 16.93%)</title><rect x="80.0852%" y="149" width="16.9329%" height="15" fill="rgb(245,182,24)" fg:x="752" fg:w="159"/><text x="80.3352%" y="159.50">wave-function`&lt;core::slice..</text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum::_{{closure}} (40 samples, 4.26%)</title><rect x="92.7583%" y="133" width="4.2599%" height="15" fill="rgb(242,14,37)" fg:x="871" fg:w="40"/><text x="93.0083%" y="143.50">wave-..</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::sum (168 samples, 17.89%)</title><rect x="79.7657%" y="181" width="17.8914%" height="15" fill="rgb(246,228,12)" fg:x="749" fg:w="168"/><text x="80.0157%" y="191.50">wave-function`core::iter::tr..</text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum (167 samples, 17.78%)</title><rect x="79.8722%" y="165" width="17.7849%" height="15" fill="rgb(213,55,15)" fg:x="750" fg:w="167"/><text x="80.1222%" y="175.50">wave-function`&lt;usize as core..</text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum::_{{closure}} (6 samples, 0.64%)</title><rect x="97.0181%" y="149" width="0.6390%" height="15" fill="rgb(209,9,3)" fg:x="911" fg:w="6"/><text x="97.2681%" y="159.50"></text></g><g><title>wave-function`core::ops::function::impls::_&lt;impl core::ops::function::FnMut&lt;A&gt; for &amp;mut F&gt;::call_mut (196 samples, 20.87%)</title><rect x="77.6358%" y="229" width="20.8733%" height="15" fill="rgb(230,59,30)" fg:x="729" fg:w="196"/><text x="77.8858%" y="239.50">wave-function`core::ops::function..</text></g><g><title>wave-function`wave_function::node::Game::next_round::_{{closure}} (194 samples, 20.66%)</title><rect x="77.8488%" y="213" width="20.6603%" height="15" fill="rgb(209,121,21)" fg:x="731" fg:w="194"/><text x="78.0988%" y="223.50">wave-function`wave_function::node..</text></g><g><title>wave-function`wave_function::node::Node&lt;_&gt;::get_entropy (183 samples, 19.49%)</title><rect x="79.0202%" y="197" width="19.4888%" height="15" fill="rgb(220,109,13)" fg:x="742" fg:w="183"/><text x="79.2702%" y="207.50">wave-function`wave_function::no..</text></g><g><title>wave-function`core::slice::_&lt;impl [T]&gt;::iter (8 samples, 0.85%)</title><rect x="97.6571%" y="181" width="0.8520%" height="15" fill="rgb(232,18,1)" fg:x="917" fg:w="8"/><text x="97.9071%" y="191.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::min (924 samples, 98.40%)</title><rect x="0.4260%" y="341" width="98.4026%" height="15" fill="rgb(215,41,42)" fg:x="4" fg:w="924"/><text x="0.6760%" y="351.50">wave-function`core::iter::traits::iterator::Iterator::min</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::min_by (924 samples, 98.40%)</title><rect x="0.4260%" y="325" width="98.4026%" height="15" fill="rgb(224,123,36)" fg:x="4" fg:w="924"/><text x="0.6760%" y="335.50">wave-function`core::iter::traits::iterator::Iterator::min_by</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::reduce (924 samples, 98.40%)</title><rect x="0.4260%" y="309" width="98.4026%" height="15" fill="rgb(240,125,3)" fg:x="4" fg:w="924"/><text x="0.6760%" y="319.50">wave-function`core::iter::traits::iterator::Iterator::reduce</text></g><g><title>wave-function`&lt;core::iter::adapters::filter::Filter&lt;I,P&gt; as core::iter::traits::iterator::Iterator&gt;::next (424 samples, 45.15%)</title><rect x="53.6741%" y="293" width="45.1544%" height="15" fill="rgb(205,98,50)" fg:x="504" fg:w="424"/><text x="53.9241%" y="303.50">wave-function`&lt;core::iter::adapters::filter::Filter&lt;I,P&gt; as core::iter::tr..</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::find (424 samples, 45.15%)</title><rect x="53.6741%" y="277" width="45.1544%" height="15" fill="rgb(205,185,37)" fg:x="504" fg:w="424"/><text x="53.9241%" y="287.50">wave-function`core::iter::traits::iterator::Iterator::find</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::try_fold (417 samples, 44.41%)</title><rect x="54.4196%" y="261" width="44.4089%" height="15" fill="rgb(238,207,15)" fg:x="511" fg:w="417"/><text x="54.6696%" y="271.50">wave-function`core::iter::traits::iterator::Iterator::try_fold</text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::find::check::_{{closure}} (209 samples, 22.26%)</title><rect x="76.5708%" y="245" width="22.2577%" height="15" fill="rgb(213,199,42)" fg:x="719" fg:w="209"/><text x="76.8208%" y="255.50">wave-function`core::iter::traits::i..</text></g><g><title>wave-function`wave_function::node::Game::next_round::_{{closure}} (3 samples, 0.32%)</title><rect x="98.5091%" y="229" width="0.3195%" height="15" fill="rgb(235,201,11)" fg:x="925" fg:w="3"/><text x="98.7591%" y="239.50"></text></g><g><title>wave-function`ndarray::impl_methods::_&lt;impl ndarray::ArrayBase&lt;S,D&gt;&gt;::indexed_iter (1 samples, 0.11%)</title><rect x="98.8285%" y="341" width="0.1065%" height="15" fill="rgb(207,46,11)" fg:x="928" fg:w="1"/><text x="99.0785%" y="351.50"></text></g><g><title>wave-function`ndarray::impl_methods::_&lt;impl ndarray::ArrayBase&lt;S,D&gt;&gt;::view (1 samples, 0.11%)</title><rect x="98.8285%" y="325" width="0.1065%" height="15" fill="rgb(241,35,35)" fg:x="928" fg:w="1"/><text x="99.0785%" y="335.50"></text></g><g><title>wave-function`ndarray::dimension::max_abs_offset_check_overflow (1 samples, 0.11%)</title><rect x="98.8285%" y="309" width="0.1065%" height="15" fill="rgb(243,32,47)" fg:x="928" fg:w="1"/><text x="99.0785%" y="319.50"></text></g><g><title>wave-function`ndarray::dimension::max_abs_offset_check_overflow_impl (1 samples, 0.11%)</title><rect x="98.8285%" y="293" width="0.1065%" height="15" fill="rgb(247,202,23)" fg:x="928" fg:w="1"/><text x="99.0785%" y="303.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::try_fold (1 samples, 0.11%)</title><rect x="98.8285%" y="277" width="0.1065%" height="15" fill="rgb(219,102,11)" fg:x="928" fg:w="1"/><text x="99.0785%" y="287.50"></text></g><g><title>wave-function`ndarray::dimension::max_abs_offset_check_overflow_impl::_{{closure}} (1 samples, 0.11%)</title><rect x="98.8285%" y="261" width="0.1065%" height="15" fill="rgb(243,110,44)" fg:x="928" fg:w="1"/><text x="99.0785%" y="271.50"></text></g><g><title>wave-function`&lt;core::option::Option&lt;T&gt; as core::ops::try_trait::Try&gt;::branch (1 samples, 0.11%)</title><rect x="98.8285%" y="245" width="0.1065%" height="15" fill="rgb(222,74,54)" fg:x="928" fg:w="1"/><text x="99.0785%" y="255.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::sum (2 samples, 0.21%)</title><rect x="98.9350%" y="277" width="0.2130%" height="15" fill="rgb(216,99,12)" fg:x="929" fg:w="2"/><text x="99.1850%" y="287.50"></text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum (2 samples, 0.21%)</title><rect x="98.9350%" y="261" width="0.2130%" height="15" fill="rgb(226,22,26)" fg:x="929" fg:w="2"/><text x="99.1850%" y="271.50"></text></g><g><title>wave-function`&lt;core::slice::iter::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::fold (2 samples, 0.21%)</title><rect x="98.9350%" y="245" width="0.2130%" height="15" fill="rgb(217,163,10)" fg:x="929" fg:w="2"/><text x="99.1850%" y="255.50"></text></g><g><title>wave-function`&lt;usize as core::iter::traits::accum::Sum&lt;&amp;usize&gt;&gt;::sum::_{{closure}} (1 samples, 0.11%)</title><rect x="99.0415%" y="229" width="0.1065%" height="15" fill="rgb(213,25,53)" fg:x="930" fg:w="1"/><text x="99.2915%" y="239.50"></text></g><g><title>wave-function`wave_function::node::Node&lt;_&gt;::get_entropy (3 samples, 0.32%)</title><rect x="98.9350%" y="293" width="0.3195%" height="15" fill="rgb(252,105,26)" fg:x="929" fg:w="3"/><text x="99.1850%" y="303.50"></text></g><g><title>wave-function`core::slice::_&lt;impl [T]&gt;::iter (1 samples, 0.11%)</title><rect x="99.1480%" y="277" width="0.1065%" height="15" fill="rgb(220,39,43)" fg:x="931" fg:w="1"/><text x="99.3980%" y="287.50"></text></g><g><title>wave-function`wave_function::node::Game::run (4 samples, 0.43%)</title><rect x="98.9350%" y="341" width="0.4260%" height="15" fill="rgb(229,68,48)" fg:x="929" fg:w="4"/><text x="99.1850%" y="351.50"></text></g><g><title>wave-function`wave_function::node::Wave::propagate (4 samples, 0.43%)</title><rect x="98.9350%" y="325" width="0.4260%" height="15" fill="rgb(252,8,32)" fg:x="929" fg:w="4"/><text x="99.1850%" y="335.50"></text></g><g><title>wave-function`wave_function::node::Wave::propagate (4 samples, 0.43%)</title><rect x="98.9350%" y="309" width="0.4260%" height="15" fill="rgb(223,20,43)" fg:x="929" fg:w="4"/><text x="99.1850%" y="319.50"></text></g><g><title>wave-function`wave_function::node::zip_mut (1 samples, 0.11%)</title><rect x="99.2545%" y="293" width="0.1065%" height="15" fill="rgb(229,81,49)" fg:x="932" fg:w="1"/><text x="99.5045%" y="303.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::for_each (1 samples, 0.11%)</title><rect x="99.2545%" y="277" width="0.1065%" height="15" fill="rgb(236,28,36)" fg:x="932" fg:w="1"/><text x="99.5045%" y="287.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::fold (1 samples, 0.11%)</title><rect x="99.2545%" y="261" width="0.1065%" height="15" fill="rgb(249,185,26)" fg:x="932" fg:w="1"/><text x="99.5045%" y="271.50"></text></g><g><title>wave-function`&lt;[T] as rand::seq::SliceRandom&gt;::choose (2 samples, 0.21%)</title><rect x="99.3610%" y="325" width="0.2130%" height="15" fill="rgb(249,174,33)" fg:x="933" fg:w="2"/><text x="99.6110%" y="335.50"></text></g><g><title>wave-function`rand::seq::gen_index (2 samples, 0.21%)</title><rect x="99.3610%" y="309" width="0.2130%" height="15" fill="rgb(233,201,37)" fg:x="933" fg:w="2"/><text x="99.6110%" y="319.50"></text></g><g><title>wave-function`rand::rng::Rng::gen_range (2 samples, 0.21%)</title><rect x="99.3610%" y="293" width="0.2130%" height="15" fill="rgb(221,78,26)" fg:x="933" fg:w="2"/><text x="99.6110%" y="303.50"></text></g><g><title>wave-function`&lt;core::ops::range::Range&lt;T&gt; as rand::distributions::uniform::SampleRange&lt;T&gt;&gt;::sample_single (2 samples, 0.21%)</title><rect x="99.3610%" y="277" width="0.2130%" height="15" fill="rgb(250,127,30)" fg:x="933" fg:w="2"/><text x="99.6110%" y="287.50"></text></g><g><title>wave-function`&lt;rand::distributions::uniform::UniformInt&lt;u32&gt; as rand::distributions::uniform::UniformSampler&gt;::sample_single (2 samples, 0.21%)</title><rect x="99.3610%" y="261" width="0.2130%" height="15" fill="rgb(230,49,44)" fg:x="933" fg:w="2"/><text x="99.6110%" y="271.50"></text></g><g><title>wave-function`&lt;rand::distributions::uniform::UniformInt&lt;u32&gt; as rand::distributions::uniform::UniformSampler&gt;::sample_single_inclusive (2 samples, 0.21%)</title><rect x="99.3610%" y="245" width="0.2130%" height="15" fill="rgb(229,67,23)" fg:x="933" fg:w="2"/><text x="99.6110%" y="255.50"></text></g><g><title>wave-function`rand::rng::Rng::gen (1 samples, 0.11%)</title><rect x="99.4675%" y="229" width="0.1065%" height="15" fill="rgb(249,83,47)" fg:x="934" fg:w="1"/><text x="99.7175%" y="239.50"></text></g><g><title>wave-function`rand::distributions::integer::_&lt;impl rand::distributions::distribution::Distribution&lt;u32&gt; for rand::distributions::Standard&gt;::sample (1 samples, 0.11%)</title><rect x="99.4675%" y="213" width="0.1065%" height="15" fill="rgb(215,43,3)" fg:x="934" fg:w="1"/><text x="99.7175%" y="223.50"></text></g><g><title>wave-function`&lt;rand_core::block::BlockRng&lt;R&gt; as rand_core::RngCore&gt;::next_u32 (1 samples, 0.11%)</title><rect x="99.4675%" y="197" width="0.1065%" height="15" fill="rgb(238,154,13)" fg:x="934" fg:w="1"/><text x="99.7175%" y="207.50"></text></g><g><title>wave-function`rand_core::block::BlockRng&lt;R&gt;::generate_and_set (1 samples, 0.11%)</title><rect x="99.4675%" y="181" width="0.1065%" height="15" fill="rgb(219,56,2)" fg:x="934" fg:w="1"/><text x="99.7175%" y="191.50"></text></g><g><title>wave-function`&lt;rand::rngs::adapter::reseeding::ReseedingCore&lt;R,Rsdr&gt; as rand_core::block::BlockRngCore&gt;::generate (1 samples, 0.11%)</title><rect x="99.4675%" y="165" width="0.1065%" height="15" fill="rgb(233,0,4)" fg:x="934" fg:w="1"/><text x="99.7175%" y="175.50"></text></g><g><title>wave-function`&lt;rand_chacha::chacha::ChaCha12Core as rand_core::block::BlockRngCore&gt;::generate (1 samples, 0.11%)</title><rect x="99.4675%" y="149" width="0.1065%" height="15" fill="rgb(235,30,7)" fg:x="934" fg:w="1"/><text x="99.7175%" y="159.50"></text></g><g><title>wave-function`rand_chacha::guts::refill_wide (1 samples, 0.11%)</title><rect x="99.4675%" y="133" width="0.1065%" height="15" fill="rgb(250,79,13)" fg:x="934" fg:w="1"/><text x="99.7175%" y="143.50"></text></g><g><title>wave-function`rand_chacha::guts::refill_wide::impl_avx2 (1 samples, 0.11%)</title><rect x="99.4675%" y="117" width="0.1065%" height="15" fill="rgb(211,146,34)" fg:x="934" fg:w="1"/><text x="99.7175%" y="127.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T,A&gt; as alloc::vec::spec_extend::SpecExtend&lt;T,I&gt;&gt;::spec_extend (1 samples, 0.11%)</title><rect x="99.5740%" y="261" width="0.1065%" height="15" fill="rgb(228,22,38)" fg:x="935" fg:w="1"/><text x="99.8240%" y="271.50"></text></g><g><title>wave-function`alloc::vec::Vec&lt;T,A&gt;::extend_desugared (1 samples, 0.11%)</title><rect x="99.5740%" y="245" width="0.1065%" height="15" fill="rgb(235,168,5)" fg:x="935" fg:w="1"/><text x="99.8240%" y="255.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::next (1 samples, 0.11%)</title><rect x="99.5740%" y="229" width="0.1065%" height="15" fill="rgb(221,155,16)" fg:x="935" fg:w="1"/><text x="99.8240%" y="239.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::filter::Filter&lt;I,P&gt; as core::iter::traits::iterator::Iterator&gt;::next (1 samples, 0.11%)</title><rect x="99.5740%" y="213" width="0.1065%" height="15" fill="rgb(215,215,53)" fg:x="935" fg:w="1"/><text x="99.8240%" y="223.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::find (1 samples, 0.11%)</title><rect x="99.5740%" y="197" width="0.1065%" height="15" fill="rgb(223,4,10)" fg:x="935" fg:w="1"/><text x="99.8240%" y="207.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::enumerate::Enumerate&lt;I&gt; as core::iter::traits::iterator::Iterator&gt;::try_fold (1 samples, 0.11%)</title><rect x="99.5740%" y="181" width="0.1065%" height="15" fill="rgb(234,103,6)" fg:x="935" fg:w="1"/><text x="99.8240%" y="191.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::try_fold (1 samples, 0.11%)</title><rect x="99.5740%" y="165" width="0.1065%" height="15" fill="rgb(227,97,0)" fg:x="935" fg:w="1"/><text x="99.8240%" y="175.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::enumerate::Enumerate&lt;I&gt; as core::iter::traits::iterator::Iterator&gt;::try_fold::enumerate::_{{closure}} (1 samples, 0.11%)</title><rect x="99.5740%" y="149" width="0.1065%" height="15" fill="rgb(234,150,53)" fg:x="935" fg:w="1"/><text x="99.8240%" y="159.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::next (1 samples, 0.11%)</title><rect x="99.6805%" y="261" width="0.1065%" height="15" fill="rgb(228,201,54)" fg:x="936" fg:w="1"/><text x="99.9305%" y="271.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::filter::Filter&lt;I,P&gt; as core::iter::traits::iterator::Iterator&gt;::next (1 samples, 0.11%)</title><rect x="99.6805%" y="245" width="0.1065%" height="15" fill="rgb(222,22,37)" fg:x="936" fg:w="1"/><text x="99.9305%" y="255.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::find (1 samples, 0.11%)</title><rect x="99.6805%" y="229" width="0.1065%" height="15" fill="rgb(237,53,32)" fg:x="936" fg:w="1"/><text x="99.9305%" y="239.50"></text></g><g><title>wave-function`&lt;core::iter::adapters::enumerate::Enumerate&lt;I&gt; as core::iter::traits::iterator::Iterator&gt;::try_fold (1 samples, 0.11%)</title><rect x="99.6805%" y="213" width="0.1065%" height="15" fill="rgb(233,25,53)" fg:x="936" fg:w="1"/><text x="99.9305%" y="223.50"></text></g><g><title>wave-function`core::iter::traits::iterator::Iterator::collect (3 samples, 0.32%)</title><rect x="99.5740%" y="325" width="0.3195%" height="15" fill="rgb(210,40,34)" fg:x="935" fg:w="3"/><text x="99.8240%" y="335.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T&gt; as core::iter::traits::collect::FromIterator&lt;T&gt;&gt;::from_iter (3 samples, 0.32%)</title><rect x="99.5740%" y="309" width="0.3195%" height="15" fill="rgb(241,220,44)" fg:x="935" fg:w="3"/><text x="99.8240%" y="319.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (3 samples, 0.32%)</title><rect x="99.5740%" y="293" width="0.3195%" height="15" fill="rgb(235,28,35)" fg:x="935" fg:w="3"/><text x="99.8240%" y="303.50"></text></g><g><title>wave-function`&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter_nested::SpecFromIterNested&lt;T,I&gt;&gt;::from_iter (3 samples, 0.32%)</title><rect x="99.5740%" y="277" width="0.3195%" height="15" fill="rgb(210,56,17)" fg:x="935" fg:w="3"/><text x="99.8240%" y="287.50"></text></g><g><title>wave-function`alloc::raw_vec::RawVec&lt;T,A&gt;::allocate_in (1 samples, 0.11%)</title><rect x="99.7870%" y="261" width="0.1065%" height="15" fill="rgb(224,130,29)" fg:x="937" fg:w="1"/><text x="100.0370%" y="271.50"></text></g><g><title>wave-function`&lt;alloc::alloc::Global as core::alloc::Allocator&gt;::allocate (1 samples, 0.11%)</title><rect x="99.7870%" y="245" width="0.1065%" height="15" fill="rgb(235,212,8)" fg:x="937" fg:w="1"/><text x="100.0370%" y="255.50"></text></g><g><title>wave-function`alloc::alloc::Global::alloc_impl (1 samples, 0.11%)</title><rect x="99.7870%" y="229" width="0.1065%" height="15" fill="rgb(223,33,50)" fg:x="937" fg:w="1"/><text x="100.0370%" y="239.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (1 samples, 0.11%)</title><rect x="99.7870%" y="213" width="0.1065%" height="15" fill="rgb(219,149,13)" fg:x="937" fg:w="1"/><text x="100.0370%" y="223.50"></text></g><g><title>libsystem_malloc.dylib`nanov2_malloc (1 samples, 0.11%)</title><rect x="99.7870%" y="197" width="0.1065%" height="15" fill="rgb(250,156,29)" fg:x="937" fg:w="1"/><text x="100.0370%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`nanov2_allocate (1 samples, 0.11%)</title><rect x="99.7870%" y="181" width="0.1065%" height="15" fill="rgb(216,193,19)" fg:x="937" fg:w="1"/><text x="100.0370%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`nanov2_allocate_from_block (1 samples, 0.11%)</title><rect x="99.7870%" y="165" width="0.1065%" height="15" fill="rgb(216,135,14)" fg:x="937" fg:w="1"/><text x="100.0370%" y="175.50"></text></g><g><title>all (939 samples, 100%)</title><rect x="0.0000%" y="517" width="100.0000%" height="15" fill="rgb(241,47,5)" fg:x="0" fg:w="939"/><text x="0.2500%" y="527.50"></text></g><g><title>dyld`start (939 samples, 100.00%)</title><rect x="0.0000%" y="501" width="100.0000%" height="15" fill="rgb(233,42,35)" fg:x="0" fg:w="939"/><text x="0.2500%" y="511.50">dyld`start</text></g><g><title>wave-function`main (939 samples, 100.00%)</title><rect x="0.0000%" y="485" width="100.0000%" height="15" fill="rgb(231,13,6)" fg:x="0" fg:w="939"/><text x="0.2500%" y="495.50">wave-function`main</text></g><g><title>wave-function`std::rt::lang_start (939 samples, 100.00%)</title><rect x="0.0000%" y="469" width="100.0000%" height="15" fill="rgb(207,181,40)" fg:x="0" fg:w="939"/><text x="0.2500%" y="479.50">wave-function`std::rt::lang_start</text></g><g><title>wave-function`std::rt::lang_start_internal (939 samples, 100.00%)</title><rect x="0.0000%" y="453" width="100.0000%" height="15" fill="rgb(254,173,49)" fg:x="0" fg:w="939"/><text x="0.2500%" y="463.50">wave-function`std::rt::lang_start_internal</text></g><g><title>wave-function`std::rt::lang_start::_{{closure}} (939 samples, 100.00%)</title><rect x="0.0000%" y="437" width="100.0000%" height="15" fill="rgb(221,1,38)" fg:x="0" fg:w="939"/><text x="0.2500%" y="447.50">wave-function`std::rt::lang_start::_{{closure}}</text></g><g><title>wave-function`std::sys_common::backtrace::__rust_begin_short_backtrace (939 samples, 100.00%)</title><rect x="0.0000%" y="421" width="100.0000%" height="15" fill="rgb(206,124,46)" fg:x="0" fg:w="939"/><text x="0.2500%" y="431.50">wave-function`std::sys_common::backtrace::__rust_begin_short_backtrace</text></g><g><title>wave-function`core::ops::function::FnOnce::call_once (939 samples, 100.00%)</title><rect x="0.0000%" y="405" width="100.0000%" height="15" fill="rgb(249,21,11)" fg:x="0" fg:w="939"/><text x="0.2500%" y="415.50">wave-function`core::ops::function::FnOnce::call_once</text></g><g><title>wave-function`wave_function::main (939 samples, 100.00%)</title><rect x="0.0000%" y="389" width="100.0000%" height="15" fill="rgb(222,201,40)" fg:x="0" fg:w="939"/><text x="0.2500%" y="399.50">wave-function`wave_function::main</text></g><g><title>wave-function`wave_function::node::main (939 samples, 100.00%)</title><rect x="0.0000%" y="373" width="100.0000%" height="15" fill="rgb(235,61,29)" fg:x="0" fg:w="939"/><text x="0.2500%" y="383.50">wave-function`wave_function::node::main</text></g><g><title>wave-function`wave_function::node::Game::next_round (936 samples, 99.68%)</title><rect x="0.3195%" y="357" width="99.6805%" height="15" fill="rgb(219,207,3)" fg:x="3" fg:w="936"/><text x="0.5695%" y="367.50">wave-function`wave_function::node::Game::next_round</text></g><g><title>wave-function`wave_function::node::get_rnd_tile (6 samples, 0.64%)</title><rect x="99.3610%" y="341" width="0.6390%" height="15" fill="rgb(222,56,46)" fg:x="933" fg:w="6"/><text x="99.6110%" y="351.50"></text></g><g><title>wave-function`core::ptr::drop_in_place&lt;alloc::vec::Vec&lt;usize&gt;&gt; (1 samples, 0.11%)</title><rect x="99.8935%" y="325" width="0.1065%" height="15" fill="rgb(239,76,54)" fg:x="938" fg:w="1"/><text x="100.1435%" y="335.50"></text></g><g><title>wave-function`&lt;alloc::raw_vec::RawVec&lt;T,A&gt; as core::ops::drop::Drop&gt;::drop (1 samples, 0.11%)</title><rect x="99.8935%" y="309" width="0.1065%" height="15" fill="rgb(231,124,27)" fg:x="938" fg:w="1"/><text x="100.1435%" y="319.50"></text></g></svg></svg>
